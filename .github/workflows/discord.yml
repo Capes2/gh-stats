@@ -1,0 +1,56 @@
+# Gold Heads Discord ingestion.
+# IMPORTANT: this file must live in the repo at:  .github/workflows/discord.yml
+# (create it via GitHub: Add file -> Create new file, type that full path)
+#
+# Every 30 minutes, pulls new CSV/zip attachments from the Discord data-drop
+# channel, validates + bakes, and posts the results back to the channel.
+# Requires two repo secrets: DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID
+# (see DISCORD_SETUP.md).
+name: discord
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: bake
+  cancel-in-progress: false
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch new attachments from Discord
+        id: fetch
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+        run: |
+          python discord_ingest.py fetch | tee /tmp/fetch.txt
+          grep -o 'count=[0-9]*' /tmp/fetch.txt | tail -1 >> "$GITHUB_OUTPUT"
+      - name: Validate
+        if: steps.fetch.outputs.count != '0'
+        run: python validate_drop.py --drop drops | tee /tmp/validate.txt || true
+      - name: Bake dashboard
+        if: steps.fetch.outputs.count != '0'
+        run: python bake_community.py --out index.html
+      - name: Commit result (state advances even on quiet polls)
+        run: |
+          git config user.name "goldheads-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "discord ingest $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase origin gh-main || true
+          git push
+      - name: Post results back to the channel
+        if: steps.fetch.outputs.count != '0'
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+        run: python discord_ingest.py reply
