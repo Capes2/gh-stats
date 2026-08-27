@@ -1,0 +1,87 @@
+# Gold Heads self-serve submissions.
+# IMPORTANT: this file must live in the repo at:  .github/workflows/ingest.yml
+# (create it via GitHub: Add file -> Create new file, type that full path)
+#
+# What it does: when anyone opens an issue with a CSV (or zip of CSVs)
+# attached, this downloads the attachment, validates it, folds accepted files
+# into corpus/, rebakes index.html, replies to the issue with the result, and
+# closes it. Contributors need only a GitHub account — nothing else.
+name: ingest
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: bake
+  cancel-in-progress: false
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Extract CSV attachments from the issue
+        id: extract
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python ingest_issue.py > /tmp/saved.txt 2> /tmp/extract_err.txt || true
+          echo "count=$(grep -c . /tmp/saved.txt || true)" >> "$GITHUB_OUTPUT"
+          cat /tmp/saved.txt /tmp/extract_err.txt
+      - name: No attachments found
+        if: steps.extract.outputs.count == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          {
+            echo "No CSV attachment found in this issue."
+            echo ""
+            echo "To submit a tournament: rename your OOTP export to"
+            echo '`<format>_<YYYY-MM-DD>_<yourname>.csv` (e.g. `earlygold_2026-08-27_awbees.csv`),'
+            echo "open a new issue, drag the file into the text box, and submit."
+            cat /tmp/extract_err.txt 2>/dev/null | sed 's/^/> /' || true
+          } > /tmp/comment.md
+          gh issue comment "$ISSUE" --body-file /tmp/comment.md
+          gh issue close "$ISSUE" --reason "not planned"
+      - name: Validate
+        if: steps.extract.outputs.count != '0'
+        run: |
+          python validate_drop.py --drop drops | tee /tmp/validate.txt || true
+      - name: Bake dashboard
+        if: steps.extract.outputs.count != '0'
+        run: python bake_community.py --out index.html
+      - name: Commit result
+        if: steps.extract.outputs.count != '0'
+        run: |
+          git config user.name "goldheads-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "ingest issue #${{ github.event.issue.number }}"
+          git pull --rebase origin gh-main || true
+          git push
+      - name: Reply and close
+        if: steps.extract.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          {
+            echo "Thanks for contributing! Result:"
+            echo ""
+            echo '```'
+            head -60 /tmp/validate.txt
+            echo '```'
+            echo ""
+            echo "Accepted files are already baking into the dashboard:"
+            echo "https://capes2.github.io/gh-stats/ (live in ~2 minutes)."
+            echo "Rejected files list a reason above — fix and open a new issue."
+          } > /tmp/comment.md
+          gh issue comment "$ISSUE" --body-file /tmp/comment.md
+          gh issue close "$ISSUE" --reason "completed"
