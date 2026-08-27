@@ -1,0 +1,43 @@
+# Gold Heads auto-bake.
+# IMPORTANT: this file must live in the repo at:  .github/workflows/bake.yml
+# (create it via GitHub: Add file -> Create new file, type that full path)
+#
+# What it does: whenever CSVs land in drops/ (or seeds/scripts change), it
+# validates them, folds the good ones into corpus/, rebakes index.html, and
+# commits the result. GitHub Pages then redeploys automatically. No local
+# steps needed.
+name: bake
+on:
+  push:
+    branches: [gh-main]
+    paths:
+      - "drops/**"
+      - "seeds/**"
+      - "validate_drop.py"
+      - "bake_community.py"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: bake
+  cancel-in-progress: false
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate drops (rejects land in quarantine/ with reasons)
+        run: python validate_drop.py --drop drops || echo "some files were quarantined"
+      - name: Bake dashboard
+        run: python bake_community.py --out index.html
+      - name: Commit result
+        run: |
+          git config user.name "goldheads-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "auto-bake $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase origin gh-main || true
+          git push
