@@ -14,6 +14,15 @@ Env: DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID (repo Actions secrets).
 """
 import glob, io, json, os, re, sys, urllib.request, zipfile
 
+try:
+    import fmt_detect
+except ImportError:
+    fmt_detect = None
+
+NAME_RE = re.compile(r"^[a-z0-9]+_(\d{4}-\d{2}-\d{2}|\d+)_?[a-z0-9\-]*(_[a-z0-9\-]+)?\.csv$")
+CONV_RE = re.compile(r"^[a-z0-9]+_\d{4}-\d{2}-\d{2}_[a-z0-9\-]+(_[a-z0-9\-]+)?\.csv$")
+LEGACY_RE = re.compile(r"^[a-z0-9]+_\d+(_tourn_export)?\.csv$")
+
 API = "https://discord.com/api/v10"
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
 CID = os.environ.get("DISCORD_CHANNEL_ID", "")
@@ -47,11 +56,33 @@ def clean(name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(name)).lower()
 
 
-def save_csv(name, data, author, saved):
+def save_csv(name, data, author, saved, hint=None, date=None):
+    """Save one CSV into drops/, resolving the tournament format if the
+    filename doesn't carry it: message text hint first, then fingerprint."""
     name = clean(name)
     if not name.endswith(".csv") or len(data) < 100 or len(data) > MAX_BYTES:
         return
     os.makedirs("drops", exist_ok=True)
+    if not (CONV_RE.match(name) or LEGACY_RE.match(name)):
+        # default-named export: figure out the format for them
+        fmt, reason = hint, ("named in the message" if hint else "")
+        if not fmt and fmt_detect is not None:
+            tmp = os.path.join("drops", ".probe.csv")
+            with open(tmp, "wb") as f:
+                f.write(data)
+            fmt, reason = fmt_detect.detect(tmp)
+            os.remove(tmp)
+        if not fmt:
+            saved[name] = {"author": author,
+                           "note": reason or "couldn't identify the tournament"}
+            return
+        base = f"{fmt}_{date or 'undated'}_{author or 'anon'}"
+        newname, n = base + ".csv", 2
+        while os.path.exists(os.path.join("drops", newname)):
+            newname = f"{base}-{n}.csv"
+            n += 1
+        print(f"  auto-named {name} -> {newname} ({reason})")
+        name = newname
     with open(os.path.join("drops", name), "wb") as f:
         f.write(data)
     saved[name] = {"author": author}
@@ -80,14 +111,16 @@ def fetch():
         msgs.sort(key=lambda m: int(m["id"]))
         for m in msgs:
             max_id = max(max_id, int(m["id"]))
-            author = (m.get("author") or {}).get("username", "?")
+            author = clean((m.get("author") or {}).get("username", "?")).replace(".csv", "") or "anon"
+            hint = fmt_detect.format_from_text(m.get("content", "")) if fmt_detect else None
+            date = (m.get("timestamp") or "")[:10] or None
             for a in m.get("attachments", []):
                 fn = clean(a.get("filename", ""))
                 if a.get("size", 0) > MAX_BYTES:
                     continue
                 if fn.endswith(".csv"):
                     try:
-                        save_csv(fn, dl(a["url"]), author, saved)
+                        save_csv(fn, dl(a["url"]), author, saved, hint, date)
                     except Exception as e:
                         print(f"ERROR downloading {fn}: {e}", file=sys.stderr)
                 elif fn.endswith(".zip"):
@@ -95,7 +128,7 @@ def fetch():
                         zf = zipfile.ZipFile(io.BytesIO(dl(a["url"])))
                         for zi in zf.infolist():
                             if zi.filename.lower().endswith(".csv") and zi.file_size <= MAX_BYTES:
-                                save_csv(zi.filename, zf.read(zi), author, saved)
+                                save_csv(zi.filename, zf.read(zi), author, saved, hint, date)
                     except Exception as e:
                         print(f"ERROR reading zip {fn}: {e}", file=sys.stderr)
         after = str(max_id)
@@ -117,7 +150,9 @@ def reply():
         return
     lines = []
     for fn, meta in sorted(batch.items()):
-        if glob.glob(f"corpus/*/{fn}"):
+        if meta.get("note"):
+            status = f"needs info ❓ — {meta['note']}"
+        elif glob.glob(f"corpus/*/{fn}"):
             status = "accepted ✅"
         elif os.path.exists(f"quarantine/{fn}"):
             reason = "see repo quarantine"
