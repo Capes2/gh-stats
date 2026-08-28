@@ -30,6 +30,7 @@ jobs:
         id: extract
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
         run: |
           python ingest_issue.py > /tmp/saved.txt 2> /tmp/extract_err.txt || true
           echo "count=$(grep -c . /tmp/saved.txt || true)" >> "$GITHUB_OUTPUT"
